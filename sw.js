@@ -1,129 +1,177 @@
 /* =====================================================
-   MAXX ROYAL — SERVICE WORKER v2
-
-   - precache app-shell + популярные блюда
-   - cache-first для изображений
-   - FIFO-чистка image-кэша
+   MAXX ROYAL — Service Worker v3.0.1 (VPN-friendly)
    ===================================================== */
 
-const CACHE_NAME   = 'maxxroyal-v2';
-const IMAGE_CACHE  = 'maxxroyal-images-v2';
-const IMAGE_LIMIT  = 300;
+const APP_VERSION   = 'v3.0.1';
+const SHELL_CACHE   = 'maxx-shell-' + APP_VERSION;
+const IMAGE_CACHE   = 'maxx-img-'   + APP_VERSION;
+const IMAGE_LIMIT   = 500;
 
-const ASSETS = [
+const APP_SHELL = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './products.js',
   './manifest.json',
+  './js/vue.min.js',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
 ];
 
-// ⚡ Прекеш популярных блюд из разных категорий.
-// Пути должны совпадать с полем image в products.js.
-// Если файла пока нет — SW не упадёт, просто пропустит.
+// Популярные картинки для первой отрисовки меню
 const PRECACHE_IMAGES = [
-  // первые 8 товаров — порядок как в PRODUCTS / что видно сразу
-  './imageswebp/vmr420420.webp',       // 1. VIP Макс Рояль
-  './imageswebp/mr300300.webp',         // 2. Макс Рояль
-  './imageswebp/db320.webp',            // 3. Дубай бургер
-  './imageswebp/kbr420420.webp',        // 4. Кинг Блэк Рояль
-  './imageswebp/br300300.webp',         // 5. Блэк Рояль
-  './imageswebp/kb300300.webp',         // 6. Кинг Бургер
-  './imageswebp/ch170170.webp',         // 7. Чизбургер
-  './imageswebp/kd180.webp',            // 8. Кинг дог
+  './imageswebp/vmr420420.webp',
+  './imageswebp/mr300300.webp',
+  './imageswebp/db320.webp',
+  './imageswebp/kbr420420.webp',
+  './imageswebp/br300300.webp',
+  './imageswebp/kb300300.webp',
+  './imageswebp/ch170170.webp',
+  './imageswebp/kd180.webp',
+  './imageswebp/vsp3000.webp',
+  './imageswebp/sr2500.webp',
+  './imageswebp/brn580.webp',
+  './imageswebp/smr900900.webp',
+  './imageswebp/shvt350.webp',
+  './imageswebp/pa470520.webp',
+  './imageswebp/fnt200.webp',
+  './imageswebp/la200.webp',
 ];
 
-/* ---------- установка ---------- */
+/* ================= INSTALL ================= */
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    (async () => {
-      const appCache = await caches.open(CACHE_NAME);
-      await appCache.addAll(ASSETS).catch(err => console.log('Cache addAll:', err));
+  event.waitUntil((async () => {
+    const shell = await caches.open(SHELL_CACHE);
+    await Promise.all(
+      APP_SHELL.map(url => shell.add(url).catch(e => console.warn('shell miss:', url)))
+    );
 
-      const imgCache = await caches.open(IMAGE_CACHE);
-      await Promise.all(
-        PRECACHE_IMAGES.map(url =>
-          imgCache.add(url).catch(() => console.log('Precache miss:', url))
-        )
-      );
-    })()
-  );
+    const imgs = await caches.open(IMAGE_CACHE);
+    await Promise.all(
+      PRECACHE_IMAGES.map(url => imgs.add(url).catch(() => {}))
+    );
+  })());
   self.skipWaiting();
 });
 
-/* ---------- активация ---------- */
+/* ================= ACTIVATE ================= */
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(
-        keys
-          .filter(k => k !== CACHE_NAME && k !== IMAGE_CACHE)
-          .map(k => caches.delete(k))
-      )
-    )
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(
+      keys
+        .filter(k => k !== SHELL_CACHE && k !== IMAGE_CACHE)
+        .map(k => caches.delete(k))
+    );
+    await self.clients.claim();
+  })());
 });
 
-/* ---------- чистка image-кэша ---------- */
+/* ================= HELPERS ================= */
 async function pruneImageCache() {
   const cache = await caches.open(IMAGE_CACHE);
   const keys  = await cache.keys();
   if (keys.length <= IMAGE_LIMIT) return;
-  const toDelete = keys.slice(0, keys.length - IMAGE_LIMIT);
-  await Promise.all(toDelete.map(k => cache.delete(k)));
+  await Promise.all(
+    keys.slice(0, keys.length - IMAGE_LIMIT).map(k => cache.delete(k))
+  );
 }
 
-/* ---------- fetch ---------- */
+async function cacheFirst(request, cacheName) {
+  const cache  = await caches.open(cacheName);
+  const cached = await cache.match(request);
+  if (cached) return cached;
+
+  try {
+    const response = await fetch(request);
+    if (response && response.status === 200) {
+      cache.put(request, response.clone()).catch(() => {});
+    }
+    return response;
+  } catch (e) {
+    return cached || new Response('', { status: 504 });
+  }
+}
+
+async function cacheFirstImage(request) {
+  const cache  = await caches.open(IMAGE_CACHE);
+  const cached = await cache.match(request);
+  if (cached) return cached;
+
+  try {
+    const response = await fetch(request);
+    if (response && response.status === 200) {
+      cache.put(request, response.clone())
+           .then(pruneImageCache)
+           .catch(() => {});
+    }
+    return response;
+  } catch (e) {
+    return cached || new Response('', { status: 504 });
+  }
+}
+
+/* ================= FETCH ================= */
 self.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET') return;
-  if (!event.request.url.startsWith('http')) return;
+  const req = event.request;
+
+  if (req.method !== 'GET') return;
+  if (!req.url.startsWith('http')) return;
+
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
 
   const isImage =
-    event.request.destination === 'image' ||
-    /\.(jpe?g|png|webp|gif|avif|svg)(\?.*)?$/i.test(event.request.url);
+    req.destination === 'image' ||
+    /\.(jpe?g|png|webp|gif|avif|svg|ico)(\?.*)?$/i.test(url.pathname);
 
-  if (isImage) {
-    event.respondWith(
-      caches.open(IMAGE_CACHE).then(async (cache) => {
-        const cached = await cache.match(event.request);
-        if (cached) return cached;
+  /* --- Навигация: отдаём из кеша мгновенно, обновляем в фоне --- */
+  if (req.mode === 'navigate') {
+    event.respondWith((async () => {
+      const cache  = await caches.open(SHELL_CACHE);
+      const cached = await cache.match('./index.html');
 
-        try {
-          const response = await fetch(event.request);
-          if (response && response.status === 200) {
-            cache.put(event.request, response.clone())
-                 .then(pruneImageCache)
-                 .catch(() => {});
-          }
-          return response;
-        } catch (e) {
-          return cached || Response.error();
+      fetch(req).then(res => {
+        if (res && res.status === 200) {
+          cache.put('./index.html', res.clone()).catch(() => {});
         }
-      })
-    );
+      }).catch(() => {});
+
+      return cached || fetch(req).catch(() =>
+        new Response('<h1>Нет сети</h1>', { status: 503, headers: { 'Content-Type': 'text/html' } })
+      );
+    })());
     return;
   }
 
+  /* --- Картинки: cache-first --- */
+  if (isImage) {
+    event.respondWith(cacheFirstImage(req));
+    return;
+  }
+
+  /* --- CSS/JS/JSON/шрифты/иконки: cache-first --- */
+  const isStatic =
+    /\.(css|js|mjs|json|woff2?|ttf|eot|webmanifest)(\?.*)?$/i.test(url.pathname) ||
+    url.pathname.startsWith('/icons/') ||
+    url.pathname === '/manifest.json';
+
+  if (isStatic) {
+    event.respondWith(cacheFirst(req, SHELL_CACHE));
+    return;
+  }
+
+  /* --- Всё остальное: сеть, при падении — кеш --- */
   event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        if (response && response.status === 200) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => {
-            cache.put(event.request, clone).catch(() => {});
-          });
+    fetch(req)
+      .then(res => {
+        if (res && res.status === 200) {
+          const clone = res.clone();
+          caches.open(SHELL_CACHE).then(c => c.put(req, clone)).catch(() => {});
         }
-        return response;
+        return res;
       })
-      .catch(() =>
-        caches.match(event.request).then(cached => {
-          if (cached) return cached;
-          if (event.request.mode === 'navigate') {
-            return caches.match('./index.html');
-          }
-        })
-      )
+      .catch(() => caches.match(req).then(r => r || Response.error()))
   );
 });
